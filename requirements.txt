@@ -1,0 +1,10 @@
+# Core Django packages
+Django==5.1.2
+djangorestframework==3.12
+django-cors-headers==4.4.0
+python-dotenv==1.0.1
+requests==2.32.3
+
+# Production / Deployment
+gunicorn==23.0.0
+whitenoise==6.7.0
