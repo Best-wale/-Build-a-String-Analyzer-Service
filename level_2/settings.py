@@ -26,7 +26,7 @@ load_dotenv()  # Load environment variables from .env file
 SECRET_KEY = 'django-insecure-&osmkvsvo+i*0!ri)7@7i_rw@9)*n&p-n@21w1&+(=r61c*3t('
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = True
 
 ALLOWED_HOSTS = ['build-a-string-analyzer-service-production.up.railway.app','127.0.0.1']
 
