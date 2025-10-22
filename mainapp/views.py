@@ -11,13 +11,21 @@ MAX_TEXT_LENGTH = 1024 * 1024  # 1MB limit
 
 
 def analyze_string(value: str) -> dict:
+    """
+    Compute the canonical properties for a string. Normalization removes non-alphanumerics
+    and lower-cases the string for palindrome and unique character checks.
+    """
     normalized = re.sub(r'[^0-9a-zA-Z]', '', value).lower()
     is_palindrome = normalized == normalized[::-1]
+    # unique characters should be computed from the normalized version
+    unique_characters = len(set(normalized))
+    # word_count should count non-empty runs of non-whitespace characters
+    word_count = len(re.findall(r'\S+', value))
     return {
         "length": len(value),
         "is_palindrome": is_palindrome,
-        "unique_characters": len(set(value)),
-        "word_count": len(value.split()),
+        "unique_characters": unique_characters,
+        "word_count": word_count,
         "sha256_hash": hashlib.sha256(value.encode()).hexdigest(),
     }
 
@@ -92,11 +100,21 @@ def strings_view(request):
         if filters["contains_character"]:
             qs = qs.filter(value__icontains=filters["contains_character"])
 
-        data = AnalyzedStringSerializer(qs, many=True).data
+        # Build consistent response entries (same structure as POST response)
+        results = []
+        for obj in qs:
+            props = analyze_string(obj.value)
+            results.append({
+                "id": obj.sha256_hash,
+                "value": obj.value,
+                "properties": props,
+                "created_at": obj.created_at.isoformat()
+            })
+
         return Response({
             "count": qs.count(),
             "filters_applied": filters,
-            "data": data
+            "data": results
         }, status=200)
 
     # DELETE → Delete all analyzed strings
@@ -114,13 +132,14 @@ def string_detail_view(request, string_value):
         return Response({"error": "String not found"}, status=404)
 
     if request.method == 'GET':
-        serializer = AnalyzedStringSerializer(obj)
+        # Return properties in the same canonical shape as POST
+        props = analyze_string(obj.value)
         return Response({
             "id": obj.sha256_hash,
             "value": obj.value,
-            "properties": serializer.data,
+            "properties": props,
             "created_at": obj.created_at.isoformat()
-        })
+        }, status=200)
 
     if request.method == 'DELETE':
         obj.delete()
@@ -129,8 +148,9 @@ def string_detail_view(request, string_value):
 
 @api_view(['GET'])
 def strings_natural_filter_view(request):
-    """/strings/natural-filter?query=..."""
-    query = request.query_params.get('query')
+    """/strings/filter-by-natural-language?query=... (also accepts 'q' param)"""
+    # Accept either `query` or `q` to be more flexible
+    query = request.query_params.get('query') or request.query_params.get('q')
     if not query:
         return Response({"error": "No query provided"}, status=400)
 
@@ -139,22 +159,55 @@ def strings_natural_filter_view(request):
         "min_length": None,
         "max_length": None,
         "word_count": None,
+        "min_word_count": None,
+        "max_word_count": None,
         "contains_character": None,
     }
 
     q = query.lower()
 
-    if "palindrome" in q:
+    # Palindrome check (singular or plural)
+    if re.search(r'\bpalindrom', q):  # matches palindrome or palindromes
         filters["is_palindrome"] = True
-    if "single word" in q or re.search(r'\bonly one word\b', q):
+
+    # Single / one-word checks
+    if re.search(r'\b(single[- ]word|only one word|one[- ]word|one word)\b', q):
         filters["word_count"] = 1
-    if match := re.search(r'longer than (\d+) characters?', q):
+
+    # Word count expressions: exactly N words, at least N words, no more than N words
+    if match := re.search(r'\bexactly (\d+) words?\b', q):
+        filters["word_count"] = int(match.group(1))
+    if match := re.search(r'\bat least (\d+) words?\b', q):
+        filters["min_word_count"] = int(match.group(1))
+    if match := re.search(r'\b(no more than|at most|no greater than) (\d+) words?\b', q):
+        filters["max_word_count"] = int(match.group(2))
+
+    # Length expressions
+    # "longer than N characters" -> min_length = N + 1
+    if match := re.search(r'\b(?:longer than|more than|greater than) (\d+) characters?\b', q):
+        filters["min_length"] = int(match.group(1)) + 1
+    # "at least N characters" -> min_length = N
+    if match := re.search(r'\bat least (\d+) characters?\b', q):
         filters["min_length"] = int(match.group(1))
-    if match := re.search(r'shorter than (\d+) characters?', q):
-        filters["max_length"] = int(match.group(1))
-    if match := re.search(r'containing the letter (\w)', q):
+    # "shorter than N characters" -> max_length = N - 1
+    if match := re.search(r'\bshorter than (\d+) characters?\b', q):
+        filters["max_length"] = int(match.group(1)) - 1
+    # "less than N characters" -> max_length = N - 1
+    if match := re.search(r'\b(?:less than|under) (\d+) characters?\b', q):
+        filters["max_length"] = int(match.group(1)) - 1
+    # "exactly N characters"
+    if match := re.search(r'\bexactly (\d+) characters?\b', q):
+        n = int(match.group(1))
+        filters["min_length"] = n
+        filters["max_length"] = n
+
+    # Contains a character: various phrasings
+    if match := re.search(r'(?:containing|contains|with) (?:the )?letter (\w)', q):
+        filters["contains_character"] = match.group(1)
+    elif match := re.search(r'containing (\w)', q):
         filters["contains_character"] = match.group(1)
 
+    # Build queryset with interpreted filters
     qs = AnalyzedString.objects.all()
     if filters["is_palindrome"] is not None:
         qs = qs.filter(is_palindrome=filters["is_palindrome"])
@@ -164,12 +217,27 @@ def strings_natural_filter_view(request):
         qs = qs.filter(length__lte=filters["max_length"])
     if filters["word_count"] is not None:
         qs = qs.filter(word_count=filters["word_count"])
+    if filters["min_word_count"] is not None:
+        qs = qs.filter(word_count__gte=filters["min_word_count"])
+    if filters["max_word_count"] is not None:
+        qs = qs.filter(word_count__lte=filters["max_word_count"])
     if filters["contains_character"] is not None:
         qs = qs.filter(value__icontains=filters["contains_character"])
+
+    # Use consistent output structure
+    results = []
+    for obj in qs:
+        props = analyze_string(obj.value)
+        results.append({
+            "id": obj.sha256_hash,
+            "value": obj.value,
+            "properties": props,
+            "created_at": obj.created_at.isoformat()
+        })
 
     serializer = AnalyzedStringSerializer(qs, many=True)
     return Response({
         "count": qs.count(),
         "interpreted_query": {"original": query, "parsed_filters": filters},
-        "data": serializer.data
+        "data": results
     }, status=200)
